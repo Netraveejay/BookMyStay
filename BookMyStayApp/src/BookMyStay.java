@@ -1,8 +1,11 @@
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Set;
 
 public class BookMyStay {
 
@@ -67,6 +70,15 @@ public class BookMyStay {
             return count == null ? 0 : count;
         }
 
+        public boolean decrementAvailability(RoomType roomType) {
+            int current = getAvailability(roomType);
+            if (current <= 0) {
+                return false;
+            }
+            availability.put(roomType, current - 1);
+            return true;
+        }
+
         public Map<RoomType, Integer> getAvailabilitySnapshot() {
             return Collections.unmodifiableMap(new EnumMap<>(availability));
         }
@@ -112,6 +124,8 @@ public class BookMyStay {
         private final String guestName;
         private final RoomType requestedRoomType;
         private final int nights;
+        private String assignedRoomId;
+        private boolean confirmed;
 
         public Reservation(String guestName, RoomType requestedRoomType, int nights) {
             this.guestName = guestName;
@@ -121,6 +135,22 @@ public class BookMyStay {
 
         public String summary() {
             return "Guest: " + guestName + ", Room: " + requestedRoomType + ", Nights: " + nights;
+        }
+
+        public RoomType getRequestedRoomType() {
+            return requestedRoomType;
+        }
+
+        public void markConfirmed(String assignedRoomId) {
+            this.assignedRoomId = assignedRoomId;
+            this.confirmed = true;
+        }
+
+        public String confirmationSummary() {
+            if (!confirmed) {
+                return summary() + ", Status: PENDING";
+            }
+            return summary() + ", Assigned Room ID: " + assignedRoomId + ", Status: CONFIRMED";
         }
     }
 
@@ -152,6 +182,78 @@ public class BookMyStay {
         public int size() {
             return requests.size();
         }
+
+        public Reservation dequeueRequest() {
+            return requests.poll();
+        }
+
+        public boolean isEmpty() {
+            return requests.isEmpty();
+        }
+    }
+
+    // Handles safe allocation, uniqueness enforcement, and inventory synchronization.
+    static class BookingService {
+        private final Inventory inventory;
+        private final Set<String> allocatedRoomIds = new HashSet<>();
+        private final Map<RoomType, Set<String>> allocatedByRoomType = new HashMap<>();
+        private final Map<RoomType, Integer> roomTypeCounters = new EnumMap<>(RoomType.class);
+
+        public BookingService(Inventory inventory) {
+            this.inventory = inventory;
+            for (RoomType roomType : RoomType.values()) {
+                allocatedByRoomType.put(roomType, new HashSet<>());
+                roomTypeCounters.put(roomType, 0);
+            }
+        }
+
+        public void processQueuedRequests(BookingRequestQueue requestQueue) {
+            System.out.println("\nProcessing Booking Requests:\n");
+            while (!requestQueue.isEmpty()) {
+                Reservation request = requestQueue.dequeueRequest();
+                if (request == null) {
+                    continue;
+                }
+                allocateRoom(request);
+            }
+        }
+
+        private void allocateRoom(Reservation reservation) {
+            RoomType requestedRoomType = reservation.getRequestedRoomType();
+            if (inventory.getAvailability(requestedRoomType) <= 0) {
+                System.out.println("Unable to confirm -> " + reservation.summary() + ", Reason: Not available");
+                return;
+            }
+
+            String roomId = generateUniqueRoomId(requestedRoomType);
+            if (!inventory.decrementAvailability(requestedRoomType)) {
+                System.out.println("Unable to confirm -> " + reservation.summary() + ", Reason: Availability changed");
+                return;
+            }
+
+            allocatedRoomIds.add(roomId);
+            allocatedByRoomType.get(requestedRoomType).add(roomId);
+            reservation.markConfirmed(roomId);
+            System.out.println("Confirmed -> " + reservation.confirmationSummary());
+        }
+
+        private String generateUniqueRoomId(RoomType roomType) {
+            String roomId;
+            do {
+                int nextCounter = roomTypeCounters.get(roomType) + 1;
+                roomTypeCounters.put(roomType, nextCounter);
+                roomId = roomType.name() + "-" + String.format("%03d", nextCounter);
+            } while (allocatedRoomIds.contains(roomId));
+            return roomId;
+        }
+
+        public void printAllocationSummary() {
+            System.out.println("\nAllocated Room IDs by Type:");
+            for (RoomType roomType : RoomType.values()) {
+                Set<String> allocatedIds = allocatedByRoomType.get(roomType);
+                System.out.println(roomType + ": " + allocatedIds);
+            }
+        }
     }
 
     public static void main(String[] args) {
@@ -176,10 +278,16 @@ public class BookMyStay {
         requestQueue.submitRequest(new Reservation("Aarav", RoomType.SINGLE, 2));
         requestQueue.submitRequest(new Reservation("Meera", RoomType.DOUBLE, 1));
         requestQueue.submitRequest(new Reservation("Rohan", RoomType.SUITE, 3));
+        requestQueue.submitRequest(new Reservation("Ishita", RoomType.SINGLE, 1));
         requestQueue.printQueueInArrivalOrder();
 
         Map<RoomType, Integer> inventoryAfterRequestIntake = inventory.getAvailabilitySnapshot();
         System.out.println("\nQueue size awaiting allocation: " + requestQueue.size());
         System.out.println("Inventory after request intake (unchanged): " + inventoryAfterRequestIntake);
+
+        BookingService bookingService = new BookingService(inventory);
+        bookingService.processQueuedRequests(requestQueue);
+        bookingService.printAllocationSummary();
+        System.out.println("\nInventory after allocation: " + inventory.getAvailabilitySnapshot());
     }
 }
