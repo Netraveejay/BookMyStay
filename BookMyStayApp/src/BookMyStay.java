@@ -9,6 +9,13 @@ import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
 import java.util.Stack;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
 
 public class BookMyStay {
 
@@ -122,6 +129,14 @@ public class BookMyStay {
         public synchronized Map<RoomType, Integer> getAvailabilitySnapshot() {
             return Collections.unmodifiableMap(new EnumMap<>(availability));
         }
+
+        public synchronized void restoreFromSnapshot(Map<RoomType, Integer> snapshot) {
+            availability.clear();
+            for (RoomType roomType : RoomType.values()) {
+                Integer value = snapshot.get(roomType);
+                availability.put(roomType, value == null ? 0 : value);
+            }
+        }
     }
 
     // Read-only service that retrieves and filters availability data.
@@ -197,6 +212,14 @@ public class BookMyStay {
 
         public String getAssignedRoomId() {
             return assignedRoomId;
+        }
+
+        public String getGuestName() {
+            return guestName;
+        }
+
+        public int getNights() {
+            return nights;
         }
 
         public boolean isCancelled() {
@@ -388,6 +411,118 @@ public class BookMyStay {
             }
             return false;
         }
+
+        public List<ReservationRecord> getSerializableRecords() {
+            List<ReservationRecord> records = new ArrayList<>();
+            for (Reservation reservation : confirmedReservations) {
+                records.add(new ReservationRecord(
+                    reservation.getGuestName(),
+                    reservation.getRequestedRoomType(),
+                    reservation.getNights(),
+                    reservation.getAssignedRoomId(),
+                    reservation.isCancelled()
+                ));
+            }
+            return records;
+        }
+
+        public void restoreFromRecords(List<ReservationRecord> records) {
+            confirmedReservations.clear();
+            if (records == null) {
+                return;
+            }
+            for (ReservationRecord record : records) {
+                Reservation reservation = new Reservation(
+                    record.guestName,
+                    record.requestedRoomType,
+                    record.nights
+                );
+                if (record.assignedRoomId != null) {
+                    reservation.markConfirmed(record.assignedRoomId);
+                }
+                if (record.cancelled) {
+                    reservation.markCancelled();
+                }
+                confirmedReservations.add(reservation);
+            }
+        }
+    }
+
+    static class ReservationRecord implements Serializable {
+        private static final long serialVersionUID = 1L;
+
+        final String guestName;
+        final RoomType requestedRoomType;
+        final int nights;
+        final String assignedRoomId;
+        final boolean cancelled;
+
+        ReservationRecord(
+            String guestName,
+            RoomType requestedRoomType,
+            int nights,
+            String assignedRoomId,
+            boolean cancelled
+        ) {
+            this.guestName = guestName;
+            this.requestedRoomType = requestedRoomType;
+            this.nights = nights;
+            this.assignedRoomId = assignedRoomId;
+            this.cancelled = cancelled;
+        }
+    }
+
+    static class PersistedState implements Serializable {
+        private static final long serialVersionUID = 1L;
+
+        final Map<RoomType, Integer> inventorySnapshot;
+        final List<ReservationRecord> bookingHistoryRecords;
+
+        PersistedState(Map<RoomType, Integer> inventorySnapshot, List<ReservationRecord> bookingHistoryRecords) {
+            this.inventorySnapshot = new EnumMap<>(inventorySnapshot);
+            this.bookingHistoryRecords = new ArrayList<>(bookingHistoryRecords);
+        }
+    }
+
+    static class PersistenceService {
+        private final String filePath;
+
+        public PersistenceService(String filePath) {
+            this.filePath = filePath;
+        }
+
+        public void saveState(Inventory inventory, BookingHistory bookingHistory) {
+            PersistedState state = new PersistedState(
+                inventory.getAvailabilitySnapshot(),
+                bookingHistory.getSerializableRecords()
+            );
+
+            try (ObjectOutputStream outputStream = new ObjectOutputStream(new FileOutputStream(filePath))) {
+                outputStream.writeObject(state);
+                System.out.println("\nState persisted successfully to " + filePath);
+            } catch (IOException exception) {
+                System.out.println("\nState persistence failed: " + exception.getMessage());
+            }
+        }
+
+        public void restoreState(Inventory inventory, BookingHistory bookingHistory) {
+            try (ObjectInputStream inputStream = new ObjectInputStream(new FileInputStream(filePath))) {
+                Object object = inputStream.readObject();
+                if (!(object instanceof PersistedState)) {
+                    System.out.println("Recovery skipped: invalid persistence format.");
+                    return;
+                }
+
+                PersistedState state = (PersistedState) object;
+                inventory.restoreFromSnapshot(state.inventorySnapshot);
+                bookingHistory.restoreFromRecords(state.bookingHistoryRecords);
+                System.out.println("Recovery completed from " + filePath);
+            } catch (FileNotFoundException exception) {
+                System.out.println("No persistence file found. Starting with default in-memory state.");
+            } catch (IOException | ClassNotFoundException exception) {
+                System.out.println("Recovery failed, continuing with safe defaults: " + exception.getMessage());
+            }
+        }
     }
 
     // Validates cancellation requests and performs rollback operations safely.
@@ -575,6 +710,9 @@ public class BookMyStay {
 
     public static void main(String[] args) {
         Inventory inventory = new Inventory();
+        BookingHistory bookingHistory = new BookingHistory();
+        PersistenceService persistenceService = new PersistenceService("bookmystay_state.ser");
+        persistenceService.restoreState(inventory, bookingHistory);
 
         Map<RoomType, Room> roomCatalog = new EnumMap<>(RoomType.class);
         roomCatalog.put(RoomType.SINGLE, new SingleRoom());
@@ -609,7 +747,6 @@ public class BookMyStay {
         System.out.println("\nQueue size awaiting allocation: " + requestQueue.size());
         System.out.println("Inventory after request intake (unchanged): " + inventoryAfterRequestIntake);
 
-        BookingHistory bookingHistory = new BookingHistory();
         BookingService bookingService = new BookingService(inventory, bookingHistory);
         bookingService.processQueuedRequests(requestQueue);
         bookingService.printAllocationSummary();
@@ -664,5 +801,15 @@ public class BookMyStay {
         concurrentProcessor.processConcurrently(3);
         concurrentBookingService.printAllocationSummary();
         System.out.println("Concurrent inventory after processing: " + concurrentInventory.getAvailabilitySnapshot());
+
+        persistenceService.saveState(inventory, bookingHistory);
+
+        System.out.println("\nSimulated restart and recovery:");
+        Inventory recoveredInventory = new Inventory();
+        BookingHistory recoveredBookingHistory = new BookingHistory();
+        persistenceService.restoreState(recoveredInventory, recoveredBookingHistory);
+        System.out.println("Recovered inventory: " + recoveredInventory.getAvailabilitySnapshot());
+        BookingReportService recoveredReportService = new BookingReportService(recoveredBookingHistory);
+        recoveredReportService.printBookingHistory();
     }
 }
