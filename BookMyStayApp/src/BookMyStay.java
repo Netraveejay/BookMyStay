@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
+import java.util.Stack;
 
 public class BookMyStay {
 
@@ -113,6 +114,11 @@ public class BookMyStay {
             return true;
         }
 
+        public void incrementAvailability(RoomType roomType) {
+            int current = getAvailability(roomType);
+            availability.put(roomType, current + 1);
+        }
+
         public Map<RoomType, Integer> getAvailabilitySnapshot() {
             return Collections.unmodifiableMap(new EnumMap<>(availability));
         }
@@ -160,6 +166,7 @@ public class BookMyStay {
         final int nights;
         private String assignedRoomId;
         private boolean confirmed;
+        private boolean cancelled;
 
         public Reservation(String guestName, RoomType requestedRoomType, int nights) {
             this.guestName = guestName;
@@ -184,11 +191,20 @@ public class BookMyStay {
             if (!confirmed) {
                 return summary() + ", Status: PENDING";
             }
-            return summary() + ", Assigned Room ID: " + assignedRoomId + ", Status: CONFIRMED";
+            String status = cancelled ? "CANCELLED" : "CONFIRMED";
+            return summary() + ", Assigned Room ID: " + assignedRoomId + ", Status: " + status;
         }
 
         public String getAssignedRoomId() {
             return assignedRoomId;
+        }
+
+        public boolean isCancelled() {
+            return cancelled;
+        }
+
+        public void markCancelled() {
+            this.cancelled = true;
         }
     }
 
@@ -322,6 +338,22 @@ public class BookMyStay {
         public Set<String> getConfirmedReservationIds() {
             return new HashSet<>(confirmedReservations.keySet());
         }
+
+        public Reservation getReservationById(String reservationId) {
+            return confirmedReservations.get(reservationId);
+        }
+
+        public void removeConfirmedReservation(String reservationId) {
+            confirmedReservations.remove(reservationId);
+        }
+
+        public void releaseRoomId(RoomType roomType, String roomId) {
+            allocatedRoomIds.remove(roomId);
+            Set<String> roomTypeAllocations = allocatedByRoomType.get(roomType);
+            if (roomTypeAllocations != null) {
+                roomTypeAllocations.remove(roomId);
+            }
+        }
     }
 
     // Ordered historical record of confirmed bookings.
@@ -337,6 +369,61 @@ public class BookMyStay {
 
         public List<Reservation> getConfirmedReservations() {
             return Collections.unmodifiableList(confirmedReservations);
+        }
+
+        public boolean markReservationCancelled(String reservationId) {
+            for (Reservation reservation : confirmedReservations) {
+                String assignedRoomId = reservation.getAssignedRoomId();
+                if (assignedRoomId != null && assignedRoomId.equals(reservationId) && !reservation.isCancelled()) {
+                    reservation.markCancelled();
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    // Validates cancellation requests and performs rollback operations safely.
+    static class CancellationService {
+        private final Inventory inventory;
+        private final BookingService bookingService;
+        private final BookingHistory bookingHistory;
+        private final Stack<String> rollbackReleasedRoomIds = new Stack<>();
+
+        public CancellationService(Inventory inventory, BookingService bookingService, BookingHistory bookingHistory) {
+            this.inventory = inventory;
+            this.bookingService = bookingService;
+            this.bookingHistory = bookingHistory;
+        }
+
+        public void cancelReservation(String reservationId) {
+            Reservation reservation = bookingService.getReservationById(reservationId);
+            if (reservation == null) {
+                System.out.println("Cancellation failed: reservation " + reservationId + " does not exist.");
+                return;
+            }
+            if (reservation.isCancelled()) {
+                System.out.println("Cancellation failed: reservation " + reservationId + " is already cancelled.");
+                return;
+            }
+
+            RoomType roomType = reservation.getRequestedRoomType();
+            bookingService.releaseRoomId(roomType, reservationId);
+            rollbackReleasedRoomIds.push(reservationId);
+            inventory.incrementAvailability(roomType);
+
+            boolean historyUpdated = bookingHistory.markReservationCancelled(reservationId);
+            if (!historyUpdated) {
+                System.out.println("Cancellation warning: history update missing for " + reservationId + ".");
+            }
+
+            reservation.markCancelled();
+            bookingService.removeConfirmedReservation(reservationId);
+            System.out.println("Cancellation confirmed -> " + reservation.confirmationSummary());
+        }
+
+        public void printRollbackStack() {
+            System.out.println("\nRollback stack (most recent release on top): " + rollbackReleasedRoomIds);
         }
     }
 
@@ -502,5 +589,14 @@ public class BookMyStay {
         BookingReportService bookingReportService = new BookingReportService(bookingHistory);
         bookingReportService.printBookingHistory();
         bookingReportService.printSummaryReport();
+
+        CancellationService cancellationService = new CancellationService(inventory, bookingService, bookingHistory);
+        System.out.println("\nProcessing cancellation requests:");
+        cancellationService.cancelReservation("SINGLE-001");
+        cancellationService.cancelReservation("SINGLE-001");
+        cancellationService.cancelReservation("SUITE-001");
+        cancellationService.printRollbackStack();
+        System.out.println("Inventory after cancellations: " + inventory.getAvailabilitySnapshot());
+        bookingReportService.printBookingHistory();
     }
 }
