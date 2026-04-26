@@ -2,7 +2,9 @@ import java.util.Collections;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.ArrayList;
 import java.util.LinkedList;
+import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
@@ -152,6 +154,10 @@ public class BookMyStay {
             }
             return summary() + ", Assigned Room ID: " + assignedRoomId + ", Status: CONFIRMED";
         }
+
+        public String getAssignedRoomId() {
+            return assignedRoomId;
+        }
     }
 
     // FCFS intake queue: collects requests and preserves arrival order.
@@ -198,6 +204,7 @@ public class BookMyStay {
         private final Set<String> allocatedRoomIds = new HashSet<>();
         private final Map<RoomType, Set<String>> allocatedByRoomType = new HashMap<>();
         private final Map<RoomType, Integer> roomTypeCounters = new EnumMap<>(RoomType.class);
+        private final Map<String, Reservation> confirmedReservations = new HashMap<>();
 
         public BookingService(Inventory inventory) {
             this.inventory = inventory;
@@ -234,6 +241,7 @@ public class BookMyStay {
             allocatedRoomIds.add(roomId);
             allocatedByRoomType.get(requestedRoomType).add(roomId);
             reservation.markConfirmed(roomId);
+            confirmedReservations.put(roomId, reservation);
             System.out.println("Confirmed -> " + reservation.confirmationSummary());
         }
 
@@ -253,6 +261,67 @@ public class BookMyStay {
                 Set<String> allocatedIds = allocatedByRoomType.get(roomType);
                 System.out.println(roomType + ": " + allocatedIds);
             }
+        }
+
+        public Set<String> getConfirmedReservationIds() {
+            return new HashSet<>(confirmedReservations.keySet());
+        }
+    }
+
+    // Optional business service attached to a confirmed reservation.
+    static class AddOnService {
+        private final String name;
+        private final double price;
+
+        public AddOnService(String name, double price) {
+            this.name = name;
+            this.price = price;
+        }
+
+        public String summary() {
+            return name + " (+" + price + ")";
+        }
+
+        public double getPrice() {
+            return price;
+        }
+    }
+
+    // Manages reservation-to-services mapping independent from core allocation.
+    static class AddOnServiceManager {
+        private final Map<String, List<AddOnService>> servicesByReservationId = new HashMap<>();
+
+        public void addService(String reservationId, AddOnService service) {
+            if (reservationId == null || reservationId.isEmpty() || service == null) {
+                return;
+            }
+            servicesByReservationId.computeIfAbsent(reservationId, key -> new ArrayList<>()).add(service);
+        }
+
+        public List<AddOnService> getServices(String reservationId) {
+            return servicesByReservationId.getOrDefault(reservationId, Collections.emptyList());
+        }
+
+        public double getTotalAdditionalCost(String reservationId) {
+            double total = 0.0;
+            for (AddOnService service : getServices(reservationId)) {
+                total += service.getPrice();
+            }
+            return total;
+        }
+
+        public void printReservationAddOns(String reservationId) {
+            List<AddOnService> services = getServices(reservationId);
+            System.out.println("\nAdd-ons for Reservation " + reservationId + ":");
+            if (services.isEmpty()) {
+                System.out.println("None selected.");
+                return;
+            }
+
+            for (AddOnService service : services) {
+                System.out.println("- " + service.summary());
+            }
+            System.out.println("Total additional cost: " + getTotalAdditionalCost(reservationId));
         }
     }
 
@@ -289,5 +358,22 @@ public class BookMyStay {
         bookingService.processQueuedRequests(requestQueue);
         bookingService.printAllocationSummary();
         System.out.println("\nInventory after allocation: " + inventory.getAvailabilitySnapshot());
+
+        AddOnServiceManager addOnServiceManager = new AddOnServiceManager();
+        Set<String> confirmedReservationIds = bookingService.getConfirmedReservationIds();
+        for (String reservationId : confirmedReservationIds) {
+            if (reservationId.startsWith("SINGLE")) {
+                addOnServiceManager.addService(reservationId, new AddOnService("Breakfast", 350.0));
+                addOnServiceManager.addService(reservationId, new AddOnService("Airport Pickup", 800.0));
+            } else if (reservationId.startsWith("DOUBLE")) {
+                addOnServiceManager.addService(reservationId, new AddOnService("Dinner Buffet", 900.0));
+            }
+        }
+
+        for (String reservationId : confirmedReservationIds) {
+            addOnServiceManager.printReservationAddOns(reservationId);
+        }
+
+        System.out.println("\nInventory after add-on selection (unchanged): " + inventory.getAvailabilitySnapshot());
     }
 }
