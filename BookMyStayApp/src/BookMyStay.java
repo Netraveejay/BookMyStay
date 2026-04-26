@@ -1,6 +1,8 @@
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.LinkedList;
 import java.util.Map;
+import java.util.Queue;
 
 public class BookMyStay {
 
@@ -105,6 +107,53 @@ public class BookMyStay {
         }
     }
 
+    // Guest booking intent captured before any allocation is attempted.
+    static class Reservation {
+        private final String guestName;
+        private final RoomType requestedRoomType;
+        private final int nights;
+
+        public Reservation(String guestName, RoomType requestedRoomType, int nights) {
+            this.guestName = guestName;
+            this.requestedRoomType = requestedRoomType;
+            this.nights = nights;
+        }
+
+        public String summary() {
+            return "Guest: " + guestName + ", Room: " + requestedRoomType + ", Nights: " + nights;
+        }
+    }
+
+    // FCFS intake queue: collects requests and preserves arrival order.
+    static class BookingRequestQueue {
+        private final Queue<Reservation> requests = new LinkedList<>();
+
+        public void submitRequest(Reservation reservation) {
+            if (reservation == null) {
+                return;
+            }
+            requests.offer(reservation);
+        }
+
+        public void printQueueInArrivalOrder() {
+            if (requests.isEmpty()) {
+                System.out.println("No pending booking requests.");
+                return;
+            }
+
+            System.out.println("Pending Booking Requests (FCFS Order):");
+            int position = 1;
+            for (Reservation reservation : requests) {
+                System.out.println(position + ". " + reservation.summary());
+                position++;
+            }
+        }
+
+        public int size() {
+            return requests.size();
+        }
+    }
+
     public static void main(String[] args) {
         Inventory inventory = new Inventory();
 
@@ -121,5 +170,16 @@ public class BookMyStay {
         // Verify search is read-only by comparing before/after snapshots.
         Map<RoomType, Integer> snapshotAfterSearch = inventory.getAvailabilitySnapshot();
         System.out.println("Inventory state after search (unchanged): " + snapshotAfterSearch);
+
+        System.out.println("\nGuest booking requests submitted:\n");
+        BookingRequestQueue requestQueue = new BookingRequestQueue();
+        requestQueue.submitRequest(new Reservation("Aarav", RoomType.SINGLE, 2));
+        requestQueue.submitRequest(new Reservation("Meera", RoomType.DOUBLE, 1));
+        requestQueue.submitRequest(new Reservation("Rohan", RoomType.SUITE, 3));
+        requestQueue.printQueueInArrivalOrder();
+
+        Map<RoomType, Integer> inventoryAfterRequestIntake = inventory.getAvailabilitySnapshot();
+        System.out.println("\nQueue size awaiting allocation: " + requestQueue.size());
+        System.out.println("Inventory after request intake (unchanged): " + inventoryAfterRequestIntake);
     }
 }
