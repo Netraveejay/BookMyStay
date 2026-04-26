@@ -17,6 +17,38 @@ public class BookMyStay {
         SUITE
     }
 
+    // Domain-specific exception for invalid booking flows.
+    static class InvalidBookingException extends Exception {
+        public InvalidBookingException(String message) {
+            super(message);
+        }
+    }
+
+    // Centralized validation for booking input and inventory state.
+    static class InvalidBookingValidator {
+        public void validateReservationInput(Reservation reservation) throws InvalidBookingException {
+            if (reservation == null) {
+                throw new InvalidBookingException("Booking request is missing.");
+            }
+            if (reservation.guestName == null || reservation.guestName.trim().isEmpty()) {
+                throw new InvalidBookingException("Guest name is required.");
+            }
+            if (reservation.requestedRoomType == null) {
+                throw new InvalidBookingException("Requested room type is invalid.");
+            }
+            if (reservation.nights <= 0) {
+                throw new InvalidBookingException("Number of nights must be greater than zero.");
+            }
+        }
+
+        public void validateInventoryState(Inventory inventory, RoomType roomType) throws InvalidBookingException {
+            int current = inventory.getAvailability(roomType);
+            if (current < 0) {
+                throw new InvalidBookingException("Inventory corruption detected for " + roomType + ".");
+            }
+        }
+    }
+
     // Domain model for room information and pricing.
     static abstract class Room {
         protected int beds;
@@ -123,9 +155,9 @@ public class BookMyStay {
 
     // Guest booking intent captured before any allocation is attempted.
     static class Reservation {
-        private final String guestName;
-        private final RoomType requestedRoomType;
-        private final int nights;
+        final String guestName;
+        final RoomType requestedRoomType;
+        final int nights;
         private String assignedRoomId;
         private boolean confirmed;
 
@@ -163,8 +195,19 @@ public class BookMyStay {
     // FCFS intake queue: collects requests and preserves arrival order.
     static class BookingRequestQueue {
         private final Queue<Reservation> requests = new LinkedList<>();
+        private final InvalidBookingValidator validator = new InvalidBookingValidator();
 
         public void submitRequest(Reservation reservation) {
+            try {
+                validator.validateReservationInput(reservation);
+                requests.offer(reservation);
+            } catch (InvalidBookingException exception) {
+                System.out.println("Rejected booking request: " + exception.getMessage());
+            }
+        }
+
+        public void submitRequestOrThrow(Reservation reservation) throws InvalidBookingException {
+            validator.validateReservationInput(reservation);
             if (reservation == null) {
                 return;
             }
@@ -202,6 +245,7 @@ public class BookMyStay {
     static class BookingService {
         private final Inventory inventory;
         private final BookingHistory bookingHistory;
+        private final InvalidBookingValidator validator = new InvalidBookingValidator();
         private final Set<String> allocatedRoomIds = new HashSet<>();
         private final Map<RoomType, Set<String>> allocatedByRoomType = new HashMap<>();
         private final Map<RoomType, Integer> roomTypeCounters = new EnumMap<>(RoomType.class);
@@ -228,24 +272,33 @@ public class BookMyStay {
         }
 
         private void allocateRoom(Reservation reservation) {
-            RoomType requestedRoomType = reservation.getRequestedRoomType();
-            if (inventory.getAvailability(requestedRoomType) <= 0) {
-                System.out.println("Unable to confirm -> " + reservation.summary() + ", Reason: Not available");
-                return;
-            }
+            try {
+                validator.validateReservationInput(reservation);
+                RoomType requestedRoomType = reservation.getRequestedRoomType();
+                validator.validateInventoryState(inventory, requestedRoomType);
 
-            String roomId = generateUniqueRoomId(requestedRoomType);
-            if (!inventory.decrementAvailability(requestedRoomType)) {
-                System.out.println("Unable to confirm -> " + reservation.summary() + ", Reason: Availability changed");
-                return;
-            }
+                if (inventory.getAvailability(requestedRoomType) <= 0) {
+                    throw new InvalidBookingException(
+                        "Unable to confirm -> " + reservation.summary() + ", Reason: Not available"
+                    );
+                }
 
-            allocatedRoomIds.add(roomId);
-            allocatedByRoomType.get(requestedRoomType).add(roomId);
-            reservation.markConfirmed(roomId);
-            confirmedReservations.put(roomId, reservation);
-            bookingHistory.addConfirmedReservation(reservation);
-            System.out.println("Confirmed -> " + reservation.confirmationSummary());
+                String roomId = generateUniqueRoomId(requestedRoomType);
+                if (!inventory.decrementAvailability(requestedRoomType)) {
+                    throw new InvalidBookingException(
+                        "Unable to confirm -> " + reservation.summary() + ", Reason: Availability changed"
+                    );
+                }
+
+                allocatedRoomIds.add(roomId);
+                allocatedByRoomType.get(requestedRoomType).add(roomId);
+                reservation.markConfirmed(roomId);
+                confirmedReservations.put(roomId, reservation);
+                bookingHistory.addConfirmedReservation(reservation);
+                System.out.println("Confirmed -> " + reservation.confirmationSummary());
+            } catch (InvalidBookingException exception) {
+                System.out.println(exception.getMessage());
+            }
         }
 
         private String generateUniqueRoomId(RoomType roomType) {
@@ -410,6 +463,13 @@ public class BookMyStay {
         requestQueue.submitRequest(new Reservation("Meera", RoomType.DOUBLE, 1));
         requestQueue.submitRequest(new Reservation("Rohan", RoomType.SUITE, 3));
         requestQueue.submitRequest(new Reservation("Ishita", RoomType.SINGLE, 1));
+        requestQueue.submitRequest(new Reservation("", RoomType.DOUBLE, 2));
+        requestQueue.submitRequest(new Reservation("Kabir", RoomType.DOUBLE, 0));
+        try {
+            requestQueue.submitRequestOrThrow(new Reservation("Naina", null, 1));
+        } catch (InvalidBookingException exception) {
+            System.out.println("Validation error: " + exception.getMessage());
+        }
         requestQueue.printQueueInArrivalOrder();
 
         Map<RoomType, Integer> inventoryAfterRequestIntake = inventory.getAvailabilitySnapshot();
