@@ -201,13 +201,15 @@ public class BookMyStay {
     // Handles safe allocation, uniqueness enforcement, and inventory synchronization.
     static class BookingService {
         private final Inventory inventory;
+        private final BookingHistory bookingHistory;
         private final Set<String> allocatedRoomIds = new HashSet<>();
         private final Map<RoomType, Set<String>> allocatedByRoomType = new HashMap<>();
         private final Map<RoomType, Integer> roomTypeCounters = new EnumMap<>(RoomType.class);
         private final Map<String, Reservation> confirmedReservations = new HashMap<>();
 
-        public BookingService(Inventory inventory) {
+        public BookingService(Inventory inventory, BookingHistory bookingHistory) {
             this.inventory = inventory;
+            this.bookingHistory = bookingHistory;
             for (RoomType roomType : RoomType.values()) {
                 allocatedByRoomType.put(roomType, new HashSet<>());
                 roomTypeCounters.put(roomType, 0);
@@ -242,6 +244,7 @@ public class BookMyStay {
             allocatedByRoomType.get(requestedRoomType).add(roomId);
             reservation.markConfirmed(roomId);
             confirmedReservations.put(roomId, reservation);
+            bookingHistory.addConfirmedReservation(reservation);
             System.out.println("Confirmed -> " + reservation.confirmationSummary());
         }
 
@@ -265,6 +268,65 @@ public class BookMyStay {
 
         public Set<String> getConfirmedReservationIds() {
             return new HashSet<>(confirmedReservations.keySet());
+        }
+    }
+
+    // Ordered historical record of confirmed bookings.
+    static class BookingHistory {
+        private final List<Reservation> confirmedReservations = new ArrayList<>();
+
+        public void addConfirmedReservation(Reservation reservation) {
+            if (reservation == null) {
+                return;
+            }
+            confirmedReservations.add(reservation);
+        }
+
+        public List<Reservation> getConfirmedReservations() {
+            return Collections.unmodifiableList(confirmedReservations);
+        }
+    }
+
+    // Read-only reporting layer for admins using stored booking history.
+    static class BookingReportService {
+        private final BookingHistory bookingHistory;
+
+        public BookingReportService(BookingHistory bookingHistory) {
+            this.bookingHistory = bookingHistory;
+        }
+
+        public void printBookingHistory() {
+            System.out.println("\nBooking History (Chronological):");
+            List<Reservation> reservations = bookingHistory.getConfirmedReservations();
+            if (reservations.isEmpty()) {
+                System.out.println("No confirmed reservations found.");
+                return;
+            }
+
+            int index = 1;
+            for (Reservation reservation : reservations) {
+                System.out.println(index + ". " + reservation.confirmationSummary());
+                index++;
+            }
+        }
+
+        public void printSummaryReport() {
+            List<Reservation> reservations = bookingHistory.getConfirmedReservations();
+            Map<RoomType, Integer> countsByRoomType = new EnumMap<>(RoomType.class);
+            for (RoomType roomType : RoomType.values()) {
+                countsByRoomType.put(roomType, 0);
+            }
+
+            for (Reservation reservation : reservations) {
+                RoomType roomType = reservation.getRequestedRoomType();
+                countsByRoomType.put(roomType, countsByRoomType.get(roomType) + 1);
+            }
+
+            System.out.println("\nBooking Summary Report:");
+            System.out.println("Total confirmed bookings: " + reservations.size());
+            for (RoomType roomType : RoomType.values()) {
+                System.out.println(roomType + " confirmations: " + countsByRoomType.get(roomType));
+            }
         }
     }
 
@@ -354,7 +416,8 @@ public class BookMyStay {
         System.out.println("\nQueue size awaiting allocation: " + requestQueue.size());
         System.out.println("Inventory after request intake (unchanged): " + inventoryAfterRequestIntake);
 
-        BookingService bookingService = new BookingService(inventory);
+        BookingHistory bookingHistory = new BookingHistory();
+        BookingService bookingService = new BookingService(inventory, bookingHistory);
         bookingService.processQueuedRequests(requestQueue);
         bookingService.printAllocationSummary();
         System.out.println("\nInventory after allocation: " + inventory.getAvailabilitySnapshot());
@@ -375,5 +438,9 @@ public class BookMyStay {
         }
 
         System.out.println("\nInventory after add-on selection (unchanged): " + inventory.getAvailabilitySnapshot());
+
+        BookingReportService bookingReportService = new BookingReportService(bookingHistory);
+        bookingReportService.printBookingHistory();
+        bookingReportService.printSummaryReport();
     }
 }
